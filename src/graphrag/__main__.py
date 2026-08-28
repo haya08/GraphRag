@@ -1,22 +1,43 @@
 import os
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from neo4j import GraphDatabase
+
 from neo4j_graphrag.llm import LLMBase, LLMResponse
 from neo4j_graphrag.retrievers import Text2CypherRetriever
+from neo4j_graphrag.generation import GraphRAG
 
 
 load_dotenv()
 
 
 # ============================================================
-# 1. Connect to Neo4j
+# 1. Neo4j Configuration
+# ============================================================
+
+NEO4J_URI = os.getenv("NEO4J_URI")
+NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
+
+if not NEO4J_URI:
+    raise ValueError("NEO4J_URI is not configured.")
+
+if not NEO4J_DATABASE:
+    raise ValueError("NEO4J_DATABASE is not configured.")
+
+
+# ============================================================
+# 2. Connect to Existing Neo4j Knowledge Graph
 # ============================================================
 
 driver = GraphDatabase.driver(
-    os.getenv("NEO4J_URL"),
-    auth=(os.getenv("NEO4J_USERNAME"), os.getenv("NEO4J_PASSWORD"))
+    NEO4J_URI,
+    auth=(
+        NEO4J_USERNAME,
+        NEO4J_PASSWORD
+    )
 )
 
 driver.verify_connectivity()
@@ -25,55 +46,35 @@ print("Connected to Neo4j!")
 
 
 # ============================================================
-# 2. Create Knowledge Graph
-# ============================================================
-
-driver.execute_query(
-    """
-    MERGE (f:Person {
-        name: 'Frodo Baggins',
-        country: 'Australia'
-    })
-
-    MERGE (l:Person {
-        name: 'Linus Torvalds',
-        country: 'Finland'
-    })
-
-    MERGE (c:YTChannel {
-        name: 'NeuralNine',
-        subscribers: 1000000
-    })
-
-    MERGE (o:OS {
-        name: 'Linux',
-        type: 'Operating System'
-    })
-
-    MERGE (f)-[:OWNS]->(c)
-    MERGE (l)-[:CREATED]->(o)
-    MERGE (f)-[:USES]->(o)
-    """,
-    database_="graphrag"
-)
-
-
-# ============================================================
-# 3. Neo4j Schema
+# 3. Existing BSKO Graph Schema
 # ============================================================
 
 SCHEMA = """
-Node labels:
+Node labels and properties:
 
-Person(name, country)
-YTChannel(name, subscribers)
-OS(name, type)
+Brand:
+    name: STRING
+
+Product:
+    name: STRING
+
+Feature:
+    name: STRING
+
+Person:
+    name: STRING
+
+Campaign:
+    name: STRING
+
 
 Relationships:
 
-Person-[:OWNS]->YTChannel
-Person-[:CREATED]->OS
-Person-[:USES]->OS
+(:Brand)-[:HAS_PRODUCT]->(:Product)
+
+(:Brand)-[:HAS_FEATURE]->(:Feature)
+
+(:Campaign)-[:LED_BY]->(:Person)
 """
 
 
@@ -92,6 +93,7 @@ gemini = ChatGoogleGenerativeAI(
 # ============================================================
 
 def extract_text(content) -> str:
+
     if isinstance(content, str):
         return content
 
@@ -109,6 +111,7 @@ def extract_text(content) -> str:
 class GeminiLLM(LLMBase):
 
     def __init__(self):
+
         super().__init__(
             model_name="gemini-3.6-flash"
         )
@@ -120,9 +123,11 @@ class GeminiLLM(LLMBase):
         system_instruction=None,
         **kwargs
     ):
+
         prompt = input
 
         if system_instruction:
+
             prompt = f"""
 System instruction:
 
@@ -136,7 +141,9 @@ User:
         response = gemini.invoke(prompt)
 
         return LLMResponse(
-            content=extract_text(response.content)
+            content=extract_text(
+                response.content
+            )
         )
 
     async def ainvoke(
@@ -146,9 +153,11 @@ User:
         system_instruction=None,
         **kwargs
     ):
+
         prompt = input
 
         if system_instruction:
+
             prompt = f"""
 System instruction:
 
@@ -162,7 +171,9 @@ User:
         response = await gemini.ainvoke(prompt)
 
         return LLMResponse(
-            content=extract_text(response.content)
+            content=extract_text(
+                response.content
+            )
         )
 
 
@@ -177,38 +188,42 @@ retriever = Text2CypherRetriever(
     driver=driver,
     llm=gemini_graphrag,
     neo4j_schema=SCHEMA,
-    neo4j_database="graphrag"
+    neo4j_database=NEO4J_DATABASE
 )
 
 
 # ============================================================
-# 7. Ask a question
+# 7. GraphRAG Pipeline
+# ============================================================
+
+rag = GraphRAG(
+    retriever=retriever,
+    llm=gemini_graphrag
+)
+
+
+# ============================================================
+# 8. Ask Question
 # ============================================================
 
 if __name__ == "__main__":
 
     q = """
-    What country is the creator of the operating system
-    used by the person who runs NeuralNine from?
-    """
+i want you to return the names of the products that brand "Nike" provides,
+and the features that each of these products has, not the features that "Nike" provides.
+"""
 
     result = retriever.search(q)
 
 
     # ========================================================
-    # 8. Generated Cypher
+    # Final Answer
     # ========================================================
 
     print("\n" + "=" * 60)
     print("GENERATED CYPHER")
     print("=" * 60)
-
     print(result.metadata.get("cypher"))
-
-
-    # ========================================================
-    # 9. Neo4j Result
-    # ========================================================
 
     print("\n" + "=" * 60)
     print("NEO4J RESULT")
@@ -219,7 +234,7 @@ if __name__ == "__main__":
 
 
     # ========================================================
-    # 10. Cleanup
+    # Cleanup
     # ========================================================
 
     driver.close()
